@@ -17,6 +17,10 @@ struct Cli {
     /// Working directory for codex to operate in.
     #[arg(short = 'C', long = "cd")]
     work_dir: Option<String>,
+
+    /// Codex executable path or command name. Defaults to `codex`.
+    #[arg(long = "codex-bin")]
+    codex_bin: Option<String>,
 }
 
 #[tokio::main]
@@ -33,14 +37,30 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    if let Some(dir) = cli.work_dir.as_deref() {
+        let path = Path::new(dir);
+        if !path.exists() {
+            eprintln!("Working directory does not exist: {dir}");
+            return ExitCode::FAILURE;
+        }
+        if !path.is_dir() {
+            eprintln!("Working directory is not a directory: {dir}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     print_plan(&cli.prompts, cli.loops, cli.work_dir.as_deref());
 
     let work_dir = cli.work_dir.clone();
+    let codex_bin = cli
+        .codex_bin
+        .clone()
+        .or_else(|| std::env::var("AGENT_LOOPS_CODEX_BIN").ok())
+        .unwrap_or_else(|| "codex".to_string());
     let results = orchestrate(&cli.prompts, cli.loops, |prompt| {
         let dir = work_dir.clone();
-        async move {
-            run_codex(&prompt, dir.as_deref().map(Path::new)).await
-        }
+        let codex_bin = codex_bin.clone();
+        async move { run_codex(&prompt, dir.as_deref().map(Path::new), &codex_bin).await }
     })
     .await;
 
