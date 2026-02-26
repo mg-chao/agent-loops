@@ -111,44 +111,71 @@ pub async fn run_codex(
     args.push(prompt.to_string());
 
     let pinned_header = current_task_header_or_default(prompt);
-    let status = if cfg!(windows) {
-        let mut cmd_args = vec!["/C".to_string(), codex_bin.to_string()];
-        cmd_args.extend(args.clone());
-        let mut cmd = Command::new("cmd");
-        cmd.args(&cmd_args);
-        run_command_with_forwarded_output(cmd, Some(pinned_header.clone())).await?
-    } else {
-        let mut direct_cmd = Command::new(codex_bin);
-        direct_cmd.args(&args);
-        match run_command_with_forwarded_output(direct_cmd, Some(pinned_header.clone())).await {
-            Ok(status) => status,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                match run_codex_via_shell(codex_bin, &args, pinned_header.as_slice()).await {
-                    Ok(status) => {
-                        if status.code() == Some(127) {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::NotFound,
-                                format!(
-                                    "could not execute `{codex_bin}`; it was not found in PATH or shell startup configuration"
-                                ),
-                            ));
-                        }
-                        status
-                    }
-                    Err(shell_e) => {
+    let status = run_codex_platform(codex_bin, &args, pinned_header).await?;
+    Ok(status.success())
+}
+
+#[cfg(windows)]
+async fn run_codex_platform(
+    codex_bin: &str,
+    args: &[String],
+    pinned_header: Vec<String>,
+) -> std::io::Result<ExitStatus> {
+    // Try running the binary directly first.
+    let mut direct_cmd = Command::new(codex_bin);
+    direct_cmd.args(args);
+    match run_command_with_forwarded_output(direct_cmd, Some(pinned_header.clone())).await {
+        Ok(status) => Ok(status),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Fallback: use `cmd /C` which resolves .cmd/.bat shims (e.g. npm-installed CLIs).
+            let mut cmd_args = vec!["/C".to_string(), codex_bin.to_string()];
+            cmd_args.extend(args.iter().cloned());
+            let mut cmd = Command::new("cmd");
+            cmd.args(&cmd_args);
+            run_command_with_forwarded_output(cmd, Some(pinned_header)).await.map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("could not execute `{codex_bin}`; it was not found in PATH"),
+                )
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(not(windows))]
+async fn run_codex_platform(
+    codex_bin: &str,
+    args: &[String],
+    pinned_header: Vec<String>,
+) -> std::io::Result<ExitStatus> {
+    let mut direct_cmd = Command::new(codex_bin);
+    direct_cmd.args(args);
+    match run_command_with_forwarded_output(direct_cmd, Some(pinned_header.clone())).await {
+        Ok(status) => Ok(status),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match run_codex_via_shell(codex_bin, args, pinned_header.as_slice()).await {
+                Ok(status) => {
+                    if status.code() == Some(127) {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::NotFound,
                             format!(
-                                "could not execute `{codex_bin}`; direct launch failed ({e}); shell fallback failed ({shell_e})"
+                                "could not execute `{codex_bin}`; it was not found in PATH or shell startup configuration"
                             ),
                         ));
                     }
+                    Ok(status)
                 }
+                Err(shell_e) => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "could not execute `{codex_bin}`; direct launch failed ({e}); shell fallback failed ({shell_e})"
+                    ),
+                )),
             }
-            Err(e) => return Err(e),
         }
-    };
-    Ok(status.success())
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Clone, Copy)]
